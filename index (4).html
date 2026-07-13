@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dillards PO Finder</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 1000px; margin: 40px auto; padding: 0 20px; color: #e8e8e8; background: #1a1a1a; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; color: #fff; }
+  h2 { font-size: 16px; font-weight: 600; margin: 28px 0 10px; color: #fff; }
+  p.sub { color: #aaa; margin-top: 0; margin-bottom: 24px; }
+  .step { background: #262626; border: 1px solid #3a3a3a; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+  .step-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: #fff; }
+  input[type=file] { font-size: 13px; color: #e8e8e8; }
+  select { font-size: 13px; padding: 5px 8px; border-radius: 6px; border: 1px solid #4a4a4a; margin-left: 6px; background: #333; color: #e8e8e8; }
+  .maprow { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+  .maprow label { width: 220px; color: #ccc; }
+  button.main { padding: 12px; font-size: 15px; font-weight: 600; border-radius: 6px; border: 1px solid #555; background: #2f2f2f; color: #e8e8e8; cursor: pointer; width: 100%; }
+  button.main:hover { background: #3a3a3a; }
+  button.small { padding: 6px 12px; font-size: 13px; border-radius: 6px; border: 1px solid #555; background: #2f2f2f; color: #e8e8e8; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }
+  th, td { border: 1px solid #3a3a3a; padding: 6px 10px; text-align: left; }
+  th { background: #303030; color: #fff; }
+  .filled { background: #163d24; color: #6fd88a; font-weight: 600; }
+  .mismatch { background: #4d3a12; color: #ffc266; font-weight: 600; }
+  .matchok { color: #6fd88a; font-size: 12px; }
+  .summary { font-size: 14px; margin: 10px 0; color: #ddd; }
+  .hidden { display: none; }
+  .preview-wrap { max-height: 260px; overflow: auto; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Dillards PO finder</h1>
+<p class="sub">Upload your file that's missing Dillards PO numbers (but has RSVS and UPC), then upload your reference file. It matches on the RSVS number and UPC code and fills in the PO.</p>
+
+<div class="step">
+  <div class="step-title">Step 1 — Upload the file that's missing Dillards PO</div>
+  <div style="font-size:12px; color:#aaa; margin-bottom:10px;">
+    Source: <a href="https://3556903.app.netsuite.com/app/common/search/searchresults.nl?searchid=5000&whence=&siaT=1783971788092&siaWhc=%2Fapp%2Fcommon%2Fsearch%2Fsearchresults.nl&siaNv=ps&siaPs=0&siaPfx=&siaQ=line+item+de" target="_blank" style="color:#7fb3ff;">Dillards | Sales Order Item Detail for Line Item PO (DO NOT EDIT): Results</a>
+  </div>
+  <input type="file" id="file1" accept=".csv,.xlsx,.xls">
+  <div id="map1" class="hidden" style="margin-top:14px;"></div>
+</div>
+
+<div class="step">
+  <div class="step-title">Step 2 — Upload your reference file (has RSVS, UPC, and Dillards PO)</div>
+  <div style="font-size:12px; color:#aaa; margin-bottom:10px;">
+    Source: Spring Systems &gt; Reports &gt; Order Detail &gt; date range 2 weeks &gt; Load &gt; CSV
+  </div>
+  <input type="file" id="file2" accept=".csv,.xlsx,.xls">
+  <div id="map2" class="hidden" style="margin-top:14px;"></div>
+</div>
+
+<button class="main" id="runBtn" disabled>Fill in missing Dillards PO</button>
+
+<div id="resultsArea"></div>
+
+<script>
+var file1Data = null, file1Headers = [];
+var file2Data = null, file2Headers = [];
+
+function normalizeId(val){
+  if(val === undefined || val === null) return '';
+  var s = String(val).trim();
+  s = s.replace(/\.0+$/, '');
+  s = s.replace(/[^0-9a-zA-Z]/g, '');
+  return s.toLowerCase();
+}
+
+function parseCSVText(text){
+  var rows = [];
+  var i = 0, field = '', row = [], inQuotes = false;
+  while(i < text.length){
+    var c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      field += c; i++; continue;
+    } else {
+      if(c === '"'){ inQuotes = true; i++; continue; }
+      if(c === ','){ row.push(field); field = ''; i++; continue; }
+      if(c === '\r'){ i++; continue; }
+      if(c === '\n'){ row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+      field += c; i++; continue;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  rows = rows.filter(function(r){ return r.some(function(cell){ return cell.trim() !== ''; }); });
+  if(!rows.length) return [];
+  var headers = rows[0];
+  return rows.slice(1).map(function(r){
+    var obj = {};
+    headers.forEach(function(h, idx){ obj[h] = r[idx] !== undefined ? r[idx] : ''; });
+    return obj;
+  });
+}
+
+function readFile(file, callback){
+  var reader = new FileReader();
+  if(file.name.toLowerCase().endsWith('.csv')){
+    reader.onload = function(e){ callback(parseCSVText(e.target.result)); };
+    reader.readAsText(file);
+  } else {
+    reader.onload = function(e){
+      var workbook = XLSX.read(e.target.result, {type: 'array'});
+      var sheet = workbook.Sheets[workbook.SheetNames[0]];
+      callback(XLSX.utils.sheet_to_json(sheet, {defval: '', raw: false}));
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function buildMapUI(containerId, headers, prefix, isFile1){
+  var container = document.getElementById(containerId);
+  container.classList.remove('hidden');
+  function makeSelect(id){
+    var sel = '<select id="' + id + '">';
+    headers.forEach(function(h){ sel += '<option value="' + h + '">' + h + '</option>'; });
+    sel += '</select>';
+    return sel;
+  }
+  container.innerHTML =
+    (isFile1 ? '<div class="maprow"><label>Sales Order # column</label>' + makeSelect(prefix + 'SalesOrder') + '</div>' : '') +
+    '<div class="maprow"><label>RSVS column (the one you have)</label>' + makeSelect(prefix + 'Rsvs') + '</div>' +
+    '<div class="maprow"><label>UPC column</label>' + makeSelect(prefix + 'Upc') + '</div>' +
+    '<div class="maprow"><label>Dillards PO column' + (isFile1 ? ' (the one that\'s missing)' : '') + '</label>' + makeSelect(prefix + 'Po') + '</div>' +
+    (isFile1 ?
+      '<div class="maprow"><label>UID column (for download)</label>' + makeSelect(prefix + 'Uid') + '</div>' +
+      '<div class="maprow"><label>Internal ID column (for download)</label>' + makeSelect(prefix + 'InternalId') + '</div>' +
+      '<div class="maprow"><label>Line ID column (for download)</label>' + makeSelect(prefix + 'LineId') + '</div>'
+    : '');
+
+  function guess(id, exactNames, keywords){
+    var el = document.getElementById(id);
+    for(var i=0;i<headers.length;i++){ if(exactNames.indexOf(headers[i]) > -1){ el.value = headers[i]; return; } }
+    for(var i=0;i<headers.length;i++){
+      var h = headers[i].toLowerCase();
+      if(keywords.some(function(k){return h.indexOf(k) > -1;})){ el.value = headers[i]; return; }
+    }
+  }
+  if(isFile1){
+    guess(prefix + 'SalesOrder', ['Sales Order #', 'Internal ID'], ['sales order', 'internal id']);
+    guess(prefix + 'Rsvs', ['Dillards RSVS', 'Dillards Receipt # (Main)'], ['rsvs', 'receipt', 'customer order']);
+    guess(prefix + 'Upc', ['UPC Code'], ['upc', 'gtin']);
+    guess(prefix + 'Po', ['Dillards PO Line'], ['po', 'order number', 'dillard']);
+    guess(prefix + 'Uid', ['UID'], ['uid']);
+    guess(prefix + 'InternalId', ['Internal ID'], ['internal id']);
+    guess(prefix + 'LineId', ['Line ID'], ['line id']);
+  } else {
+    guess(prefix + 'Rsvs', ['customer_order_number', 'po.attributes.customer_order_number'], ['rsvs', 'customer order']);
+    guess(prefix + 'Upc', ['product.product_gtin'], ['upc', 'gtin']);
+    guess(prefix + 'Po', ['po_num', 'po.po_num'], ['po', 'order number', 'dillard']);
+  }
+}
+
+document.getElementById('file1').addEventListener('change', function(e){
+  var f = e.target.files[0]; if(!f) return;
+  readFile(f, function(rows){
+    file1Data = rows; file1Headers = Object.keys(rows[0] || {});
+    buildMapUI('map1', file1Headers, 'f1', true);
+    checkReady();
+  });
+});
+document.getElementById('file2').addEventListener('change', function(e){
+  var f = e.target.files[0]; if(!f) return;
+  readFile(f, function(rows){
+    file2Data = rows; file2Headers = Object.keys(rows[0] || {});
+    buildMapUI('map2', file2Headers, 'f2', false);
+    checkReady();
+  });
+});
+function checkReady(){ document.getElementById('runBtn').disabled = !(file1Data && file2Data); }
+
+document.getElementById('runBtn').addEventListener('click', function(){
+  var f1SalesOrder = document.getElementById('f1SalesOrder').value;
+  var f1Rsvs = document.getElementById('f1Rsvs').value;
+  var f1Upc = document.getElementById('f1Upc').value;
+  var f1Po = document.getElementById('f1Po').value;
+  var f2Rsvs = document.getElementById('f2Rsvs').value;
+  var f2Upc = document.getElementById('f2Upc').value;
+  var f2Po = document.getElementById('f2Po').value;
+
+  var byRsvsUpc = {};
+  var byRsvs = {};
+  file2Data.forEach(function(row){
+    var rsvsKey = normalizeId(row[f2Rsvs]);
+    var upcKey = normalizeId(row[f2Upc]);
+    var poVal = String(row[f2Po] || '').trim();
+    if(!rsvsKey || !poVal) return;
+
+    if(upcKey){
+      var comboKey = rsvsKey + '|' + upcKey;
+      if(!byRsvsUpc[comboKey]) byRsvsUpc[comboKey] = [];
+      if(byRsvsUpc[comboKey].indexOf(poVal) === -1) byRsvsUpc[comboKey].push(poVal);
+    }
+
+    if(!byRsvs[rsvsKey]) byRsvs[rsvsKey] = [];
+    if(byRsvs[rsvsKey].indexOf(poVal) === -1) byRsvs[rsvsKey].push(poVal);
+  });
+
+  var filledCount = 0, unresolvedCount = 0, ambiguousCount = 0, upcMismatchCount = 0;
+  var resultRows = file1Data.map(function(row){
+    var out = Object.assign({}, row);
+    var needsPo = !String(row[f1Po] || '').trim();
+    var poFilled = false, ambiguous = false, upcMismatch = false;
+
+    var rsvsKey = normalizeId(row[f1Rsvs]);
+    var upcKey = normalizeId(row[f1Upc]);
+    var rsvsOptions = byRsvs[rsvsKey] || [];
+    var comboOptions = upcKey ? byRsvsUpc[rsvsKey + '|' + upcKey] : null;
+
+    // PO/Check Number: every PO on file for this RSVS, e.g. "PO 1 | PO 2"
+    out.__poCheckList = rsvsOptions.length ? rsvsOptions.join(' | ') : '';
+
+    if(needsPo){
+      if(comboOptions && comboOptions.length === 1){
+        out[f1Po] = comboOptions[0];
+        poFilled = true;
+        filledCount++;
+      } else if(comboOptions && comboOptions.length > 1){
+        out[f1Po] = 'MULTIPLE MATCHES: ' + comboOptions.join(' / ');
+        ambiguous = true;
+        ambiguousCount++;
+      } else if(rsvsOptions.length === 1){
+        // RSVS matched, but the UPC did not line up with any UPC on file for that RSVS.
+        // We still have exactly one PO to go on, so we fill it in, but flag it for a manual double-check.
+        out[f1Po] = rsvsOptions[0];
+        poFilled = true;
+        upcMismatch = true;
+        filledCount++;
+        upcMismatchCount++;
+      } else if(rsvsOptions.length > 1){
+        out[f1Po] = 'MULTIPLE MATCHES: ' + rsvsOptions.join(' / ');
+        ambiguous = true;
+        ambiguousCount++;
+      } else {
+        unresolvedCount++;
+      }
+    }
+    out.__poFilled = poFilled;
+    out.__ambiguous = ambiguous;
+    out.__upcMismatch = upcMismatch;
+    out.__unresolved = needsPo && !poFilled && !ambiguous;
+    return out;
+  });
+
+  renderResults(resultRows, f1SalesOrder, f1Rsvs, f1Upc, f1Po, filledCount, unresolvedCount, ambiguousCount, upcMismatchCount);
+});
+
+function renderResults(rows, salesOrderCol, rsvsCol, upcCol, poCol, filledCount, unresolvedCount, ambiguousCount, upcMismatchCount){
+  var html = '<div class="step"><h2>Results</h2>';
+  html += '<div class="summary">Filled in ' + filledCount + ' Dillards PO numbers (matched on RSVS + UPC, falling back to RSVS alone when no UPC match was found). ' + unresolvedCount + ' could not be matched. ' + ambiguousCount + ' still had more than one possible PO even after matching on UPC (flagged below, needs manual pick). ' + upcMismatchCount + ' were filled using the RSVS only because the UPC did not match anything on file for that RSVS — double-check these (flagged below).</div>';
+  html += '<button class="small" id="downloadBtn">Download filled file (CSV)</button>';
+  html += '<div class="preview-wrap"><table><thead><tr><th>' + salesOrderCol + '</th><th>' + rsvsCol + '</th><th>' + upcCol + '</th><th>PO/Check Number</th><th>' + poCol + '</th><th>Match</th></tr></thead><tbody>';
+  var shownRows = rows.filter(function(row){ return row.__poFilled || row.__ambiguous; });
+  shownRows.forEach(function(row){
+    html += '<tr><td>' + (row[salesOrderCol] || '') + '</td><td>' + (row[rsvsCol] || '') + '</td><td>' + (row[upcCol] || '') + '</td>';
+    html += '<td>' + (row.__poCheckList || '') + '</td>';
+    html += '<td class="filled">' + (row[poCol] || '') + '</td>';
+    if(row.__upcMismatch){
+      html += '<td class="mismatch">⚠ UPC mismatch</td>';
+    } else if(row.__ambiguous){
+      html += '<td>—</td>';
+    } else {
+      html += '<td class="matchok">✓ matched</td>';
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table></div></div>';
+  document.getElementById('resultsArea').innerHTML = html;
+
+  document.getElementById('downloadBtn').addEventListener('click', function(){
+    var uidCol = document.getElementById('f1Uid').value;
+    var internalIdCol = document.getElementById('f1InternalId').value;
+    var lineIdCol = document.getElementById('f1LineId').value;
+
+    var exportHeaders = ['UID', 'Internal ID', 'PO/Check Number', 'Line ID', 'Dillards PO Line'];
+    var matchedRows = rows.filter(function(r){ return r.__poFilled; });
+    if(!matchedRows.length){
+      alert('No rows had a full match to export yet.');
+      return;
+    }
+    var exportRows = matchedRows.map(function(r){
+      return {
+        'UID': r[uidCol],
+        'Internal ID': r[internalIdCol],
+        'PO/Check Number': r.__poCheckList || r[poCol],
+        'Line ID': r[lineIdCol],
+        'Dillards PO Line': r[poCol]
+      };
+    });
+    function escapeCell(val){
+      val = String(val === undefined || val === null ? '' : val);
+      if(val.indexOf(',') > -1 || val.indexOf('"') > -1 || val.indexOf('\n') > -1){
+        return '"' + val.replace(/"/g, '""') + '"';
+      }
+      return val;
+    }
+    var lines = [exportHeaders.map(escapeCell).join(',')];
+    exportRows.forEach(function(r){ lines.push(exportHeaders.map(function(h){ return escapeCell(r[h]); }).join(',')); });
+    var blob = new Blob([lines.join('\r\n')], {type: 'text/csv'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'filled_dillards_po.csv'; a.click();
+    URL.revokeObjectURL(url);
+  });
+}
+</script>
+
+</body>
+</html>
